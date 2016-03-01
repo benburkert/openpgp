@@ -23,7 +23,7 @@ const maxSessionKeySizeInBytes = 64
 // 4880, section 5.3.
 type SymmetricKeyEncrypted struct {
 	Cipher       algorithm.Cipher
-	s2k          func(out, in []byte)
+	s2k          s2k.S2K
 	encryptedKey []byte
 }
 
@@ -73,14 +73,20 @@ func (ske *SymmetricKeyEncrypted) parse(r io.Reader) error {
 // packet.
 func (ske *SymmetricKeyEncrypted) Decrypt(passphrase []byte) ([]byte, algorithm.Cipher, error) {
 	key := make([]byte, ske.Cipher.KeySize())
-	ske.s2k(key, passphrase)
+	if err := ske.s2k.Convert(key, passphrase); err != nil {
+		return nil, nil, err
+	}
 
 	if len(ske.encryptedKey) == 0 {
 		return key, ske.Cipher, nil
 	}
 
-	// the IV is all zeros
-	iv := make([]byte, ske.Cipher.BlockSize())
+	// the IV is all zeros (unless an S2K extension is used)
+	iv, err := ske.s2k.SetupIV(ske.Cipher.BlockSize())
+	if err != nil {
+		return nil, nil, err
+	}
+
 	c := cipher.NewCFBDecrypter(ske.Cipher.New(key), iv)
 	plaintextKey := make([]byte, len(ske.encryptedKey))
 	c.XORKeyStream(plaintextKey, ske.encryptedKey)
@@ -104,15 +110,26 @@ func (ske *SymmetricKeyEncrypted) Decrypt(passphrase []byte) ([]byte, algorithm.
 // SerializeSymmetricallyEncrypted.
 // If config is nil, sensible defaults will be used.
 func SerializeSymmetricKeyEncrypted(w io.Writer, passphrase []byte, config *Config) (key []byte, err error) {
+	s2kConfig := &s2k.Config{
+		Hash:     config.Hash(),
+		S2KCount: config.PasswordHashIterations(),
+		Rand:     config.Random(),
+	}
+
+	s2K, err := s2k.New(s2kConfig)
+	if err != nil {
+		return
+	}
+
 	cipherAlgo := config.Cipher()
 	keySize := cipherAlgo.KeySize()
+	keyEncryptingKey := make([]byte, keySize)
+	if err = s2K.Convert(keyEncryptingKey, passphrase); err != nil {
+		return
+	}
 
 	s2kBuf := new(bytes.Buffer)
-	keyEncryptingKey := make([]byte, keySize)
-	// s2k.Serialize salts and stretches the passphrase, and writes the
-	// resulting key to keyEncryptingKey and the s2k descriptor to s2kBuf.
-	err = s2k.Serialize(s2kBuf, keyEncryptingKey, config.Random(), passphrase, &s2k.Config{Hash: config.Hash(), S2KCount: config.PasswordHashIterations()})
-	if err != nil {
+	if _, err = s2K.WriteTo(s2kBuf); err != nil {
 		return
 	}
 	s2kBytes := s2kBuf.Bytes()
