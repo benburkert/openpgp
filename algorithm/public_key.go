@@ -194,12 +194,18 @@ func (pk publicKey) Encrypt(rand io.Reader, pub crypto.PublicKey, msg []byte, fi
 			return nil, errors.InvalidArgumentError("cannot encrypt to wrong type of public key")
 		}
 
+		kdfCipher, ok := CipherById[ecdhpub.KDF.Bytes()[2]]
+		if !ok {
+			return nil, errors.InvalidArgumentError("unknown KDF cipher")
+		}
+
 		// the sender MAY use 21, 13, and 5 bytes of padding for AES-128,
 		// AES-192, and AES-256, respectively, to provide the same number of
 		// octets, 40 total, as an input to the key wrapping method.
-		padding := make([]byte, 40-len(msg))
+		padded_length := (kdfCipher.KeySize()/8+1)*8
+		padding := make([]byte, padded_length-len(msg))
 		for i := range padding {
-			padding[i] = byte(40 - len(msg))
+			padding[i] = byte(padded_length - len(msg))
 		}
 		m := append(msg, padding...)
 
@@ -264,10 +270,6 @@ func (pk publicKey) Encrypt(rand io.Reader, pub crypto.PublicKey, msg []byte, fi
 		}
 		mb := h.Sum(nil)
 
-		kdfCipher, ok := CipherById[ecdhpub.KDF.Bytes()[2]]
-		if !ok {
-			return nil, errors.InvalidArgumentError("unknown KDF cipher")
-		}
 		z := mb[:kdfCipher.KeySize()] // return oBits leftmost bits of MB.
 
 		c, err := keywrap.Wrap(z, m)
